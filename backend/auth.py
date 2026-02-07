@@ -8,6 +8,9 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL") 
 
+print("AUTH DEBUG — SUPABASE_URL =", SUPABASE_URL)
+
+
 _jwks_cache = None
 
 def _get_jwks():
@@ -54,7 +57,7 @@ def require_user(authorization: str = Header(None)):
             token,
             key,
             algorithms=[header.get("alg", "RS256")],
-            options={"verify_aud": False},  # keep simple for now
+            options={"verify_aud": False}, 
         )
         user_id = payload.get("sub")
         if not user_id:
