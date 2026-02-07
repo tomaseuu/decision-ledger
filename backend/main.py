@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI  # type: ignore
 from db import get_conn
 
 app = FastAPI()

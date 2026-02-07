@@ -1,7 +1,7 @@
 import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from dotenv import load_dotenv
+import psycopg2 # type: ignore
+from psycopg2.extras import RealDictCursor # type: ignore
+from dotenv import load_dotenv # type: ignore
 
 load_dotenv()
 
