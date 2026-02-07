@@ -1,5 +1,6 @@
-from fastapi import FastAPI  # type: ignore
+from fastapi import FastAPI, Depends #type: ignore
 from db import get_conn
+from auth import require_user
 
 app = FastAPI()
 
@@ -17,3 +18,7 @@ def db_test():
             return {"db_ok": True, "result": row}
     finally:
         conn.close()
+
+@app.get("/me")
+def me(user=Depends(require_user)):
+    return {"user_id": user["user_id"]}
