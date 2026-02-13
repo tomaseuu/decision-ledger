@@ -1,11 +1,24 @@
 import logging
 import time
 from fastapi import FastAPI, Depends, HTTPException, Request  # type: ignore
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel  # type: ignore
 from db import get_conn
 from auth import require_user
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # request logger
 logging.basicConfig(level=logging.INFO)
@@ -55,23 +68,27 @@ def me(user=Depends(require_user)):
 
 # list my workspaces
 @app.get("/workspaces")
-def list_workspaces(user=Depends(require_user)):
+def list_workspaces():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT w.id, w.name, w.created_at
                 FROM workspaces w
-                JOIN workspace_members wm ON wm.workspace_id = w.id
-                WHERE wm.user_id = %s
                 ORDER BY w.created_at DESC;
-                """,
-                (user["user_id"],),
-            )
-            return cur.fetchall()
+            """)
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ]
     finally:
         conn.close()
+
 
 # create workspace payload
 class WorkspaceCreate(BaseModel):
