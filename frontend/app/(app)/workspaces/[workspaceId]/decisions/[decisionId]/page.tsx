@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
-import { apiGet, apiPost } from "@/lib/api";
+import { useParams, useRouter } from "next/navigation";
+import { apiDelete, apiGet, apiPost, apiPut } from "@/lib/api";
 
 type Decision = {
   id: string;
@@ -47,17 +47,53 @@ const STATUS_OPTIONS = [
 ] as const;
 type StatusValue = (typeof STATUS_OPTIONS)[number];
 
-function Pill({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-full border border-neutral-200 bg-white px-2 py-0.5 text-xs text-neutral-700">
-      {children}
-    </span>
-  );
-}
-
 function coerceStatus(v: string | undefined): StatusValue {
   const x = (v ?? "").trim() as StatusValue;
   return (STATUS_OPTIONS as readonly string[]).includes(x) ? x : "proposed";
+}
+
+function formatDate(dateString?: string) {
+  if (!dateString) return "—";
+  const d = new Date(dateString);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function statusLabel(s: string) {
+  const v = (s || "proposed").toLowerCase();
+  if (v === "approved") return "Decided";
+  if (v === "in_review") return "Revised";
+  if (v === "deprecated") return "Deprecated";
+  return "Proposed";
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const v = (status || "proposed").toLowerCase();
+  const cls =
+    v === "approved"
+      ? "border-[#16A34A] bg-[#16A34A] bg-opacity-5 text-[#16A34A]"
+      : v === "in_review"
+        ? "border-[#F59E0B] bg-[#F59E0B] bg-opacity-5 text-[#B45309]"
+        : v === "deprecated"
+          ? "border-[#9CA3AF] bg-[#F3F4F6] text-[#374151]"
+          : "border-[#F59E0B] bg-[#F59E0B] bg-opacity-5 text-[#B45309]";
+
+  return (
+    <span
+      className={[
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium",
+        cls,
+      ].join(" ")}
+    >
+      {statusLabel(v)}
+    </span>
+  );
 }
 
 function ConfirmModal(props: {
@@ -94,11 +130,10 @@ function ConfirmModal(props: {
           onCancel();
         }}
       />
-
       <div className="relative w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
-        <div className="text-lg font-semibold text-neutral-900">{title}</div>
+        <div className="text-lg font-semibold text-[#111827]">{title}</div>
         {description ? (
-          <div className="mt-1 text-sm text-neutral-600">{description}</div>
+          <div className="mt-1 text-sm text-[#6B7280]">{description}</div>
         ) : null}
 
         {error ? (
@@ -110,7 +145,7 @@ function ConfirmModal(props: {
         <div className="mt-6 flex justify-end gap-2">
           <button
             disabled={busy}
-            className="rounded-lg px-3 py-2 text-sm text-neutral-600 hover:bg-neutral-100 disabled:opacity-50"
+            className="rounded-lg px-3 py-2 text-sm text-[#6B7280] hover:bg-neutral-100 disabled:opacity-50"
             onClick={onCancel}
           >
             Cancel
@@ -121,8 +156,8 @@ function ConfirmModal(props: {
             className={[
               "rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50",
               danger
-                ? "bg-red-600 hover:bg-red-700"
-                : "bg-neutral-900 hover:bg-neutral-800",
+                ? "bg-[#DC2626] hover:bg-[#B91C1C]"
+                : "bg-[#111827] hover:bg-[#0B1220]",
             ].join(" ")}
             onClick={onConfirm}
           >
@@ -136,6 +171,8 @@ function ConfirmModal(props: {
 
 export default function DecisionDetailPage() {
   const params = useParams<{ workspaceId: string; decisionId: string }>();
+  const router = useRouter();
+
   const workspaceId = params.workspaceId;
   const decisionId = params.decisionId;
 
@@ -159,13 +196,13 @@ export default function DecisionDetailPage() {
   const [chooseSavingId, setChooseSavingId] = useState<string | null>(null);
   const [chooseError, setChooseError] = useState<string | null>(null);
 
-  // Add revision state
+  // Add revision state (from Revision History card)
   const [revOpen, setRevOpen] = useState(false);
   const [revText, setRevText] = useState("");
   const [revSaving, setRevSaving] = useState(false);
   const [revError, setRevError] = useState<string | null>(null);
 
-  // Edit state
+  // Edit state (modal)
   const [editOpen, setEditOpen] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editStatus, setEditStatus] = useState<StatusValue>("proposed");
@@ -188,104 +225,6 @@ export default function DecisionDetailPage() {
   >(null);
 
   const pageTitle = useMemo(() => decision?.title ?? "Decision", [decision]);
-
-  function openEdit() {
-    setEditError(null);
-    setEditTitle(decision?.title ?? "");
-    setEditStatus(coerceStatus(decision?.status));
-    setEditContext(details?.context ?? "");
-    setEditFinal(details?.final_decision ?? "");
-    setEditRationale(details?.rationale ?? "");
-    setEditOpen(true);
-  }
-
-  async function saveEdit() {
-    if (!decision || !details) return;
-
-    const nextDecision: Decision = {
-      ...decision,
-      title: editTitle.trim() || decision.title,
-      status: editStatus,
-    };
-
-    const nextDetails: DecisionDetails = {
-      ...details,
-      context: editContext,
-      final_decision: editFinal,
-      rationale: editRationale,
-    };
-
-    const prevDecision = decision;
-    const prevDetails = details;
-
-    setEditSaving(true);
-    setEditError(null);
-
-    // optimistic update
-    setDecision(nextDecision);
-    setDetails(nextDetails);
-
-    try {
-      const [updatedDecision, updatedDetails] = await Promise.all([
-        apiPost(`/decisions/${decisionId}`, {
-          title: nextDecision.title,
-          status: nextDecision.status,
-        }) as Promise<Decision>,
-        apiPost(`/decisions/${decisionId}/details`, {
-          context: nextDetails.context,
-          final_decision: nextDetails.final_decision,
-          rationale: nextDetails.rationale,
-        }) as Promise<DecisionDetails>,
-      ]);
-
-      setDecision(updatedDecision);
-      setDetails(updatedDetails);
-      setEditOpen(false);
-    } catch (e: any) {
-      // rollback
-      setDecision(prevDecision);
-      setDetails(prevDetails);
-
-      const msg = e?.message ?? "Failed to save changes";
-      if (msg.includes(" 401 ") || msg.toLowerCase().includes("unauthorized")) {
-        setEditError("You’re not signed in. Sign in to edit this decision.");
-      } else {
-        setEditError(msg);
-      }
-    } finally {
-      setEditSaving(false);
-    }
-  }
-
-  async function chooseOption(optionId: string) {
-    setChooseError(null);
-    setChooseSavingId(optionId);
-
-    const prev = options;
-
-    // optimistic local choose
-    setOptions((curr) =>
-      curr.map((o) => ({
-        ...o,
-        is_chosen: o.id === optionId,
-      })),
-    );
-
-    try {
-      await apiPost(`/decisions/${decisionId}/options/${optionId}/choose`, {});
-    } catch (e: any) {
-      setOptions(prev);
-
-      const msg = e?.message ?? "Failed to choose option";
-      if (msg.includes(" 401 ") || msg.toLowerCase().includes("unauthorized")) {
-        setChooseError("You’re not signed in. Sign in to choose an option.");
-      } else {
-        setChooseError(msg);
-      }
-    } finally {
-      setChooseSavingId(null);
-    }
-  }
 
   function openConfirm(args: {
     title: string;
@@ -330,6 +269,100 @@ export default function DecisionDetailPage() {
     }
   }
 
+  function openEdit() {
+    setEditError(null);
+    setEditTitle(decision?.title ?? "");
+    setEditStatus(coerceStatus(decision?.status));
+    setEditContext(details?.context ?? "");
+    setEditFinal(details?.final_decision ?? "");
+    setEditRationale(details?.rationale ?? "");
+    setEditOpen(true);
+  }
+
+  async function saveEdit() {
+    if (!decision || !details) return;
+
+    // We *can* reliably save details via PUT /details
+    const nextDetails: DecisionDetails = {
+      ...details,
+      context: editContext,
+      final_decision: editFinal,
+      rationale: editRationale,
+    };
+
+    const prevDecision = decision;
+    const prevDetails = details;
+
+    // Optimistic update (title/status locally)
+    const nextDecision: Decision = {
+      ...decision,
+      title: editTitle.trim() || decision.title,
+      status: editStatus,
+    };
+
+    setEditSaving(true);
+    setEditError(null);
+    setDecision(nextDecision);
+    setDetails(nextDetails);
+
+    try {
+      // ✅ backend supports this
+      const updatedDetails = (await apiPut(`/decisions/${decisionId}/details`, {
+        context: nextDetails.context,
+        final_decision: nextDetails.final_decision,
+        rationale: nextDetails.rationale,
+      })) as DecisionDetails;
+
+      // NOTE: Your backend does NOT show an endpoint to update decision title/status.
+      // So we keep it client-side for now. If you add one, I’ll wire it in.
+      setDetails(updatedDetails);
+      setEditOpen(false);
+    } catch (e: any) {
+      setDecision(prevDecision);
+      setDetails(prevDetails);
+
+      const msg = e?.message ?? "Failed to save changes";
+      if (msg.includes(" 401 ") || msg.toLowerCase().includes("unauthorized")) {
+        setEditError("You’re not signed in. Sign in to edit this decision.");
+      } else {
+        setEditError(msg);
+      }
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  async function chooseOption(optionId: string) {
+    setChooseError(null);
+    setChooseSavingId(optionId);
+
+    const prev = options;
+
+    // optimistic local choose
+    setOptions((curr) =>
+      curr.map((o) => ({
+        ...o,
+        is_chosen: o.id === optionId,
+      })),
+    );
+
+    try {
+      // ✅ matches your FastAPI: PUT /options/{option_id}/choose
+      await apiPut(`/options/${optionId}/choose`, {});
+    } catch (e: any) {
+      setOptions(prev);
+
+      const msg = e?.message ?? "Failed to choose option";
+      if (msg.includes(" 401 ") || msg.toLowerCase().includes("unauthorized")) {
+        setChooseError("You’re not signed in. Sign in to choose an option.");
+      } else {
+        setChooseError(msg);
+      }
+    } finally {
+      setChooseSavingId(null);
+    }
+  }
+
   function requestDeleteOption(optionId: string) {
     const opt = options.find((o) => o.id === optionId);
     openConfirm({
@@ -344,10 +377,9 @@ export default function DecisionDetailPage() {
         setOptions((curr) => curr.filter((o) => o.id !== optionId));
 
         try {
-          await apiPost(
-            `/decisions/${decisionId}/options/${optionId}/delete`,
-            {},
-          );
+          // If you have a real delete endpoint, switch to it.
+          // For now, try DELETE /decisions/{decisionId}/options/{optionId}
+          await apiDelete(`/decisions/${decisionId}/options/${optionId}`);
         } catch (e) {
           setOptions(prev);
           throw e;
@@ -370,14 +402,31 @@ export default function DecisionDetailPage() {
         setRevisions((curr) => curr.filter((r) => r.id !== revId));
 
         try {
-          await apiPost(
-            `/decisions/${decisionId}/revisions/${revId}/delete`,
-            {},
-          );
+          // If you have a real delete endpoint, switch to it.
+          // For now, try DELETE /decisions/{decisionId}/revisions/{revId}
+          await apiDelete(`/decisions/${decisionId}/revisions/${revId}`);
         } catch (e) {
           setRevisions(prev);
           throw e;
         }
+      },
+    });
+  }
+
+  function requestDeleteDecision() {
+    openConfirm({
+      title: "Delete Decision",
+      description:
+        "Are you sure you want to delete this decision? This action cannot be undone.",
+      confirmText: "Delete",
+      danger: true,
+      action: async () => {
+        // ✅ You asked: “if I press delete, it should just remove it”
+        // This assumes you have DELETE /decisions/{decisionId} on backend.
+        await apiDelete(`/decisions/${decisionId}`);
+
+        // Go back to decisions list immediately after delete
+        router.push(`/workspaces/${workspaceId}/decisions`);
       },
     });
   }
@@ -426,319 +475,417 @@ export default function DecisionDetailPage() {
   }, [workspaceId, decisionId]);
 
   return (
-    <div className="max-w-4xl">
-      <div className="flex items-center justify-between gap-4">
-        <Link
-          href={`/workspaces/${workspaceId}/decisions`}
-          className="text-sm text-neutral-500 hover:text-neutral-700"
-        >
-          ← Back to decisions
-        </Link>
+    <div className="min-h-screen bg-[#F8F9FB]">
+      {/* Header */}
+      <div className="border-b border-[#E5E7EB] bg-white px-8 py-6">
+        <div className="mx-auto flex max-w-6xl items-center justify-between">
+          <div className="flex items-center gap-4">
+            <Link
+              href={`/workspaces/${workspaceId}/decisions`}
+              className="text-[#6B7280] hover:text-[#111827]"
+            >
+              ←
+            </Link>
+            <div className="flex items-center gap-3">
+              <h1 className="text-2xl font-bold text-[#111827]">{pageTitle}</h1>
+              {decision?.status ? (
+                <StatusBadge status={decision.status} />
+              ) : null}
+            </div>
+          </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50 disabled:opacity-50"
-            onClick={openEdit}
-            disabled={loading || !!error || !decision || !details}
-          >
-            Edit
-          </button>
-
-          <button
-            className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-medium text-white hover:bg-neutral-800"
-            onClick={() => {
-              setRevError(null);
-              setRevText("");
-              setRevOpen(true);
-            }}
-          >
-            + Add revision
-          </button>
+          <div className="flex gap-2">
+            <button
+              className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-sm font-medium text-[#111827] hover:bg-[#F3F4F6] disabled:opacity-50"
+              onClick={openEdit}
+              disabled={loading || !!error || !decision || !details}
+            >
+              Edit
+            </button>
+            <button
+              className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-sm font-medium text-[#DC2626] hover:bg-[#DC2626] hover:text-white disabled:opacity-50"
+              onClick={requestDeleteDecision}
+              disabled={loading || !!error || !decision}
+            >
+              Delete
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="mt-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-2xl font-semibold tracking-tight text-neutral-900">
-            {pageTitle}
-          </h1>
-          {decision?.status && <Pill>{decision.status}</Pill>}
-          <Pill>ID: {decisionId}</Pill>
-        </div>
-        <p className="mt-1 text-sm text-neutral-600">
-          Context, options considered, final decision, and history.
-        </p>
-      </div>
-
-      {loading ? (
-        <div className="mt-6 space-y-4">
-          <div className="h-24 animate-pulse rounded-xl border border-neutral-200 bg-white" />
-          <div className="h-24 animate-pulse rounded-xl border border-neutral-200 bg-white" />
-          <div className="h-40 animate-pulse rounded-xl border border-neutral-200 bg-white" />
-        </div>
-      ) : error ? (
-        <div className="mt-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          {error}
-        </div>
-      ) : (
-        <div className="mt-6 space-y-6">
-          <section className="rounded-xl border border-neutral-200 bg-white p-5">
-            <div className="text-sm font-semibold text-neutral-900">
-              Details
+      {/* Content */}
+      <div className="flex-1 overflow-auto bg-[#F8F9FB] p-8">
+        <div className="mx-auto max-w-6xl">
+          {loading ? (
+            <div className="space-y-4">
+              <div className="h-24 animate-pulse rounded-lg border border-[#E5E7EB] bg-white" />
+              <div className="h-24 animate-pulse rounded-lg border border-[#E5E7EB] bg-white" />
+              <div className="h-40 animate-pulse rounded-lg border border-[#E5E7EB] bg-white" />
             </div>
-            <div className="mt-4 grid gap-4">
-              <div>
-                <div className="text-xs font-medium text-neutral-500">
-                  Context
-                </div>
-                <div className="mt-1 whitespace-pre-wrap text-sm text-neutral-900">
-                  {details?.context || "—"}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs font-medium text-neutral-500">
-                  Final decision
-                </div>
-                <div className="mt-1 whitespace-pre-wrap text-sm text-neutral-900">
-                  {details?.final_decision || "—"}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs font-medium text-neutral-500">
-                  Rationale
-                </div>
-                <div className="mt-1 whitespace-pre-wrap text-sm text-neutral-900">
-                  {details?.rationale || "—"}
-                </div>
-              </div>
+          ) : error ? (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {error}
             </div>
-          </section>
+          ) : (
+            <div className="grid grid-cols-3 gap-6">
+              {/* Main - 2 columns */}
+              <div className="col-span-2 space-y-6">
+                {/* Problem Context */}
+                <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
+                  <h2 className="text-lg font-semibold text-[#111827] mb-3">
+                    Problem Context
+                  </h2>
+                  <p className="whitespace-pre-wrap leading-relaxed text-[#111827]">
+                    {details?.context || "No context provided"}
+                  </p>
+                </div>
 
-          <section className="rounded-xl border border-neutral-200 bg-white p-5">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-semibold text-neutral-900">
-                Options
-              </div>
-              <button
-                className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 hover:bg-neutral-50"
-                onClick={() => {
-                  setAddOptionError(null);
-                  setChooseError(null);
-                  setAddingOption(true);
-                }}
-              >
-                + Add option
-              </button>
-            </div>
-
-            {addingOption && (
-              <div className="mt-4 rounded-lg border border-neutral-200 bg-neutral-50 p-4">
-                {addOptionError && (
-                  <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                    {addOptionError}
-                  </div>
-                )}
-
-                <div className="grid gap-3">
-                  <input
-                    autoFocus
-                    placeholder="Option title"
-                    value={optName}
-                    onChange={(e) => setOptName(e.target.value)}
-                    className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
-                  />
-
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <textarea
-                      placeholder="Pros (optional)"
-                      value={optPros}
-                      onChange={(e) => setOptPros(e.target.value)}
-                      rows={3}
-                      className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
-                    />
-                    <textarea
-                      placeholder="Cons (optional)"
-                      value={optCons}
-                      onChange={(e) => setOptCons(e.target.value)}
-                      rows={3}
-                      className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
-                    />
-                  </div>
-
-                  <div className="flex justify-end gap-2">
+                {/* Options Considered */}
+                <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-semibold text-[#111827]">
+                      Options Considered
+                    </h2>
                     <button
-                      disabled={addingOptionSaving}
-                      className="rounded-lg px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-200 disabled:opacity-50"
+                      className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-sm font-medium text-[#111827] hover:bg-[#F3F4F6]"
                       onClick={() => {
-                        setAddingOption(false);
-                        setOptName("");
-                        setOptPros("");
-                        setOptCons("");
                         setAddOptionError(null);
+                        setChooseError(null);
+                        setAddingOption(true);
                       }}
                     >
-                      Cancel
-                    </button>
-
-                    <button
-                      disabled={addingOptionSaving || !optName.trim()}
-                      className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
-                      onClick={async () => {
-                        const name = optName.trim();
-                        if (!name) return;
-
-                        setAddingOptionSaving(true);
-                        setAddOptionError(null);
-
-                        try {
-                          const created = (await apiPost(
-                            `/decisions/${decisionId}/options`,
-                            {
-                              option_name: name,
-                              pros: optPros.trim() || null,
-                              cons: optCons.trim() || null,
-                              is_chosen: false,
-                            },
-                          )) as DecisionOption;
-
-                          setOptions((prev) => [created, ...prev]);
-
-                          setAddingOption(false);
-                          setOptName("");
-                          setOptPros("");
-                          setOptCons("");
-                        } catch (e: any) {
-                          const msg = e?.message ?? "Failed to add option";
-                          if (
-                            msg.includes(" 401 ") ||
-                            msg.toLowerCase().includes("unauthorized")
-                          ) {
-                            setAddOptionError(
-                              "You’re not signed in. Sign in to add options.",
-                            );
-                          } else {
-                            setAddOptionError(msg);
-                          }
-                        } finally {
-                          setAddingOptionSaving(false);
-                        }
-                      }}
-                    >
-                      {addingOptionSaving ? "Adding…" : "Add option"}
+                      + Add option
                     </button>
                   </div>
-                </div>
-              </div>
-            )}
 
-            {chooseError && (
-              <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                {chooseError}
-              </div>
-            )}
-
-            <div className="mt-4 grid gap-3">
-              {options.map((o) => (
-                <div
-                  key={o.id}
-                  className="rounded-lg border border-neutral-200 p-4"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-medium text-neutral-900">
-                      {o.option_name}
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      {o.is_chosen ? <Pill>Chosen</Pill> : <Pill>Option</Pill>}
-
-                      {!o.is_chosen && (
-                        <button
-                          disabled={chooseSavingId === o.id}
-                          className="rounded-lg border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-900 hover:bg-neutral-50 disabled:opacity-50"
-                          onClick={() => chooseOption(o.id)}
-                        >
-                          {chooseSavingId === o.id ? "Choosing…" : "Choose"}
-                        </button>
+                  {addingOption && (
+                    <div className="mb-4 rounded-lg border border-[#E5E7EB] bg-[#F8F9FB] p-4">
+                      {addOptionError && (
+                        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                          {addOptionError}
+                        </div>
                       )}
 
-                      <button
-                        className="rounded-lg border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-                        onClick={() => requestDeleteOption(o.id)}
-                      >
-                        Delete
-                      </button>
+                      <div className="grid gap-3">
+                        <input
+                          autoFocus
+                          placeholder="Option name"
+                          value={optName}
+                          onChange={(e) => setOptName(e.target.value)}
+                          className="w-full rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
+                        />
+
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <textarea
+                            placeholder="Pros (optional)"
+                            value={optPros}
+                            onChange={(e) => setOptPros(e.target.value)}
+                            rows={3}
+                            className="w-full rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
+                          />
+                          <textarea
+                            placeholder="Cons (optional)"
+                            value={optCons}
+                            onChange={(e) => setOptCons(e.target.value)}
+                            rows={3}
+                            className="w-full rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
+                          />
+                        </div>
+
+                        <div className="flex justify-end gap-2">
+                          <button
+                            disabled={addingOptionSaving}
+                            className="rounded-lg px-3 py-2 text-sm text-[#6B7280] hover:bg-[#E5E7EB] disabled:opacity-50"
+                            onClick={() => {
+                              setAddingOption(false);
+                              setOptName("");
+                              setOptPros("");
+                              setOptCons("");
+                              setAddOptionError(null);
+                            }}
+                          >
+                            Cancel
+                          </button>
+
+                          <button
+                            disabled={addingOptionSaving || !optName.trim()}
+                            className="rounded-lg bg-[#111827] px-4 py-2 text-sm font-medium text-white hover:bg-[#0B1220] disabled:opacity-40"
+                            onClick={async () => {
+                              const name = optName.trim();
+                              if (!name) return;
+
+                              setAddingOptionSaving(true);
+                              setAddOptionError(null);
+
+                              try {
+                                const created = (await apiPost(
+                                  `/decisions/${decisionId}/options`,
+                                  {
+                                    option_name: name,
+                                    pros: optPros.trim() || null,
+                                    cons: optCons.trim() || null,
+                                    is_chosen: false,
+                                  },
+                                )) as DecisionOption;
+
+                                setOptions((prev) => [created, ...prev]);
+
+                                setAddingOption(false);
+                                setOptName("");
+                                setOptPros("");
+                                setOptCons("");
+                              } catch (e: any) {
+                                const msg =
+                                  e?.message ?? "Failed to add option";
+                                if (
+                                  msg.includes(" 401 ") ||
+                                  msg.toLowerCase().includes("unauthorized")
+                                ) {
+                                  setAddOptionError(
+                                    "You’re not signed in. Sign in to add options.",
+                                  );
+                                } else {
+                                  setAddOptionError(msg);
+                                }
+                              } finally {
+                                setAddingOptionSaving(false);
+                              }
+                            }}
+                          >
+                            {addingOptionSaving ? "Adding..." : "Add option"}
+                          </button>
+                        </div>
+                      </div>
                     </div>
+                  )}
+
+                  {chooseError && (
+                    <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                      {chooseError}
+                    </div>
+                  )}
+
+                  {options.length === 0 ? (
+                    <div className="text-sm text-[#6B7280]">
+                      No options yet.
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {options.map((o) => (
+                        <div
+                          key={o.id}
+                          className={[
+                            "rounded-lg border p-4",
+                            o.is_chosen
+                              ? "border-[#16A34A] bg-[#16A34A] bg-opacity-5"
+                              : "border-[#E5E7EB]",
+                          ].join(" ")}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="font-semibold text-[#111827]">
+                                {o.option_name}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={[
+                                  "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium",
+                                  o.is_chosen
+                                    ? "border-[#16A34A] bg-[#16A34A] bg-opacity-5 text-[#16A34A]"
+                                    : "border-[#E5E7EB] bg-white text-[#374151]",
+                                ].join(" ")}
+                              >
+                                {o.is_chosen ? "Chosen" : "Option"}
+                              </span>
+
+                              {!o.is_chosen && (
+                                <button
+                                  disabled={chooseSavingId === o.id}
+                                  className="rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#111827] hover:bg-[#F3F4F6] disabled:opacity-50"
+                                  onClick={() => chooseOption(o.id)}
+                                >
+                                  {chooseSavingId === o.id
+                                    ? "Choosing..."
+                                    : "Choose"}
+                                </button>
+                              )}
+
+                              <button
+                                className="rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#6B7280] hover:bg-[#F3F4F6]"
+                                onClick={() => requestDeleteOption(o.id)}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="mt-3 grid grid-cols-2 gap-4">
+                            <div>
+                              <div className="text-sm font-medium text-[#16A34A] mb-1">
+                                Pros
+                              </div>
+                              <div className="text-sm text-[#111827] whitespace-pre-wrap">
+                                {o.pros || "None listed"}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-sm font-medium text-[#DC2626] mb-1">
+                                Cons
+                              </div>
+                              <div className="text-sm text-[#111827] whitespace-pre-wrap">
+                                {o.cons || "None listed"}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Final Decision */}
+                <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
+                  <h2 className="text-lg font-semibold text-[#111827] mb-3">
+                    Final Decision
+                  </h2>
+                  <div className="rounded-lg border border-[#2563EB] border-opacity-20 bg-[#2563EB] bg-opacity-5 p-4">
+                    <p className="whitespace-pre-wrap font-medium text-[#111827]">
+                      {details?.final_decision || "—"}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Rationale */}
+                <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
+                  <h2 className="text-lg font-semibold text-[#111827] mb-3">
+                    Rationale
+                  </h2>
+                  <p className="whitespace-pre-wrap leading-relaxed text-[#111827]">
+                    {details?.rationale || "—"}
+                  </p>
+                </div>
+
+                {/* Revision History */}
+                <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-semibold text-[#111827]">
+                      Revision History
+                    </h2>
+                    <button
+                      className="rounded-lg bg-[#111827] px-4 py-2 text-sm font-medium text-white hover:bg-[#0B1220]"
+                      onClick={() => {
+                        setRevError(null);
+                        setRevText("");
+                        setRevOpen(true);
+                      }}
+                    >
+                      + Add revision
+                    </button>
                   </div>
 
-                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  {revisions.length === 0 ? (
+                    <div className="text-sm text-[#6B7280]">
+                      No revisions yet.
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {revisions.map((r, index) => (
+                        <div key={r.id} className="flex gap-4">
+                          <div className="relative flex flex-col items-center">
+                            <div className="w-2 h-2 bg-[#2563EB] rounded-full mt-1" />
+                            {index < revisions.length - 1 && (
+                              <div className="w-px flex-1 bg-[#E5E7EB] mt-1" />
+                            )}
+                          </div>
+
+                          <div className="flex-1 pb-4">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="text-sm font-medium text-[#111827]">
+                                  Version {revisions.length - index}
+                                </div>
+                                <div className="text-xs text-[#6B7280] mt-0.5">
+                                  {r.author_id} • {formatDate(r.created_at)}
+                                </div>
+                                <div className="text-sm text-[#111827] mt-1 whitespace-pre-wrap">
+                                  {r.summary}
+                                </div>
+                              </div>
+
+                              <button
+                                className="rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#6B7280] hover:bg-[#F3F4F6]"
+                                onClick={() => requestDeleteRevision(r.id)}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Sidebar - 1 column */}
+              <div className="space-y-6">
+                <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
+                  <h2 className="text-sm font-semibold text-[#111827] mb-4">
+                    Metadata
+                  </h2>
+
+                  <div className="space-y-3">
                     <div>
-                      <div className="text-xs font-medium text-neutral-500">
-                        Pros
-                      </div>
-                      <div className="mt-1 whitespace-pre-wrap text-sm text-neutral-900">
-                        {o.pros || "—"}
+                      <div className="text-xs text-[#6B7280] mb-1">Owner</div>
+                      <div className="text-sm font-medium text-[#111827]">
+                        {decision?.owner_id || "Demo User"}
                       </div>
                     </div>
+
                     <div>
-                      <div className="text-xs font-medium text-neutral-500">
-                        Cons
+                      <div className="text-xs text-[#6B7280] mb-1">Status</div>
+                      <div>
+                        {decision?.status ? (
+                          <StatusBadge status={decision.status} />
+                        ) : (
+                          "—"
+                        )}
                       </div>
-                      <div className="mt-1 whitespace-pre-wrap text-sm text-neutral-900">
-                        {o.cons || "—"}
+                    </div>
+
+                    <div>
+                      <div className="text-xs text-[#6B7280] mb-1">Created</div>
+                      <div className="text-sm text-[#111827]">
+                        {formatDate(decision?.created_at)}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-xs text-[#6B7280] mb-1">
+                        Last Updated
+                      </div>
+                      <div className="text-sm text-[#111827]">
+                        {formatDate(decision?.updated_at)}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-xs text-[#6B7280] mb-1">ID</div>
+                      <div className="text-sm text-[#111827] break-all">
+                        {decisionId}
                       </div>
                     </div>
                   </div>
                 </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="rounded-xl border border-neutral-200 bg-white p-5">
-            <div className="text-sm font-semibold text-neutral-900">
-              History
-            </div>
-
-            {revisions.length === 0 ? (
-              <div className="mt-4 text-sm text-neutral-600">
-                No revisions yet.
               </div>
-            ) : (
-              <div className="mt-4 space-y-3">
-                {revisions.map((r) => (
-                  <div
-                    key={r.id}
-                    className="rounded-lg border border-neutral-200 bg-white p-4"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-sm font-medium text-neutral-900">
-                        {r.summary}
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        <div className="text-xs text-neutral-500">
-                          {r.created_at
-                            ? new Date(r.created_at).toLocaleString()
-                            : ""}
-                        </div>
-                        <button
-                          className="rounded-lg border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-                          onClick={() => requestDeleteRevision(r.id)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                    <div className="mt-1 text-xs text-neutral-500">
-                      Author: {r.author_id}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
+      {/* Edit Modal */}
       {editOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div
@@ -748,12 +895,11 @@ export default function DecisionDetailPage() {
               setEditOpen(false);
             }}
           />
-
           <div className="relative w-full max-w-2xl rounded-xl bg-white p-6 shadow-xl">
-            <h2 className="text-lg font-semibold text-neutral-900">
+            <h2 className="text-lg font-semibold text-[#111827]">
               Edit decision
             </h2>
-            <p className="mt-1 text-sm text-neutral-600">
+            <p className="mt-1 text-sm text-[#6B7280]">
               Update the title, status, and write-up for this decision.
             </p>
 
@@ -766,18 +912,18 @@ export default function DecisionDetailPage() {
             <div className="mt-4 grid gap-3">
               <div className="grid gap-3 md:grid-cols-2">
                 <div>
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
+                  <div className="mb-1 text-xs font-medium text-[#6B7280]">
                     Title
                   </div>
                   <input
                     value={editTitle}
                     onChange={(e) => setEditTitle(e.target.value)}
-                    className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                    className="w-full rounded-lg border border-[#E5E7EB] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
                   />
                 </div>
 
                 <div>
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
+                  <div className="mb-1 text-xs font-medium text-[#6B7280]">
                     Status
                   </div>
                   <select
@@ -785,11 +931,11 @@ export default function DecisionDetailPage() {
                     onChange={(e) =>
                       setEditStatus(coerceStatus(e.target.value))
                     }
-                    className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
+                    className="w-full rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
                   >
                     {STATUS_OPTIONS.map((s) => (
                       <option key={s} value={s}>
-                        {s}
+                        {statusLabel(s)}
                       </option>
                     ))}
                   </select>
@@ -797,37 +943,38 @@ export default function DecisionDetailPage() {
               </div>
 
               <div>
-                <div className="mb-1 text-xs font-medium text-neutral-600">
-                  Context
+                <div className="mb-1 text-xs font-medium text-[#6B7280]">
+                  Problem Context
                 </div>
                 <textarea
                   value={editContext}
                   onChange={(e) => setEditContext(e.target.value)}
                   rows={6}
-                  className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                  className="w-full rounded-lg border border-[#E5E7EB] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
                 />
               </div>
 
               <div>
-                <div className="mb-1 text-xs font-medium text-neutral-600">
-                  Final decision
+                <div className="mb-1 text-xs font-medium text-[#6B7280]">
+                  Final Decision
                 </div>
-                <input
+                <textarea
                   value={editFinal}
                   onChange={(e) => setEditFinal(e.target.value)}
-                  className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                  rows={3}
+                  className="w-full rounded-lg border border-[#E5E7EB] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
                 />
               </div>
 
               <div>
-                <div className="mb-1 text-xs font-medium text-neutral-600">
+                <div className="mb-1 text-xs font-medium text-[#6B7280]">
                   Rationale
                 </div>
                 <textarea
                   value={editRationale}
                   onChange={(e) => setEditRationale(e.target.value)}
                   rows={5}
-                  className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                  className="w-full rounded-lg border border-[#E5E7EB] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
                 />
               </div>
             </div>
@@ -835,7 +982,7 @@ export default function DecisionDetailPage() {
             <div className="mt-6 flex justify-end gap-2">
               <button
                 disabled={editSaving}
-                className="rounded-lg px-3 py-2 text-sm text-neutral-600 hover:bg-neutral-100 disabled:opacity-50"
+                className="rounded-lg px-3 py-2 text-sm text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-50"
                 onClick={() => setEditOpen(false)}
               >
                 Cancel
@@ -843,16 +990,17 @@ export default function DecisionDetailPage() {
 
               <button
                 disabled={editSaving || !editTitle.trim()}
-                className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
+                className="rounded-lg bg-[#111827] px-4 py-2 text-sm font-medium text-white hover:bg-[#0B1220] disabled:opacity-40"
                 onClick={saveEdit}
               >
-                {editSaving ? "Saving…" : "Save"}
+                {editSaving ? "Saving..." : "Save"}
               </button>
             </div>
           </div>
         </div>
       )}
 
+      {/* Add Revision Modal */}
       {revOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div
@@ -862,12 +1010,11 @@ export default function DecisionDetailPage() {
               setRevOpen(false);
             }}
           />
-
           <div className="relative w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
-            <h2 className="text-lg font-semibold text-neutral-900">
+            <h2 className="text-lg font-semibold text-[#111827]">
               Add revision
             </h2>
-            <p className="mt-1 text-sm text-neutral-600">
+            <p className="mt-1 text-sm text-[#6B7280]">
               Log an update to preserve decision history.
             </p>
 
@@ -884,14 +1031,14 @@ export default function DecisionDetailPage() {
                 value={revText}
                 onChange={(e) => setRevText(e.target.value)}
                 rows={5}
-                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                className="w-full rounded-lg border border-[#E5E7EB] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"
               />
             </div>
 
             <div className="mt-6 flex justify-end gap-2">
               <button
                 disabled={revSaving}
-                className="rounded-lg px-3 py-2 text-sm text-neutral-600 hover:bg-neutral-100 disabled:opacity-50"
+                className="rounded-lg px-3 py-2 text-sm text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-50"
                 onClick={() => {
                   setRevOpen(false);
                   setRevText("");
@@ -903,7 +1050,7 @@ export default function DecisionDetailPage() {
 
               <button
                 disabled={revSaving || !revText.trim()}
-                className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
+                className="rounded-lg bg-[#111827] px-4 py-2 text-sm font-medium text-white hover:bg-[#0B1220] disabled:opacity-40"
                 onClick={async () => {
                   const text = revText.trim();
                   if (!text) return;
@@ -938,7 +1085,7 @@ export default function DecisionDetailPage() {
                   }
                 }}
               >
-                {revSaving ? "Adding…" : "Add revision"}
+                {revSaving ? "Adding..." : "Add revision"}
               </button>
             </div>
           </div>

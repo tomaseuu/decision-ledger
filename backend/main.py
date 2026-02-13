@@ -325,6 +325,51 @@ def get_decision_details(decision_id: str, user=Depends(require_user)):
     finally:
         conn.close()
 
+
+# delete decision (member-only)
+@app.delete("/decisions/{decision_id}")
+def delete_decision(decision_id: str, user=Depends(require_user)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # 1) find decision + workspace
+            cur.execute(
+                "SELECT id, workspace_id FROM decisions WHERE id = %s;",
+                (decision_id,),
+            )
+            decision = cur.fetchone()
+            if not decision:
+                raise HTTPException(status_code=404, detail="Decision not found")
+
+            # 2) permission check
+            cur.execute(
+                """
+                SELECT 1
+                FROM workspace_members
+                WHERE workspace_id = %s AND user_id = %s;
+                """,
+                (decision["workspace_id"], user["user_id"]),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=403, detail="Not allowed")
+
+            # 3) delete children first (unless you have ON DELETE CASCADE)
+            cur.execute("DELETE FROM decision_details WHERE decision_id = %s;", (decision_id,))
+            cur.execute("DELETE FROM decision_options WHERE decision_id = %s;", (decision_id,))
+            cur.execute("DELETE FROM decision_revisions WHERE decision_id = %s;", (decision_id,))
+
+            # 4) delete the decision
+            cur.execute("DELETE FROM decisions WHERE id = %s;", (decision_id,))
+
+        conn.commit()
+        return {"ok": True}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # upsert decision details payload
 class DecisionDetailsUpsert(BaseModel):
     context: str

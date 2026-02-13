@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { apiPost } from "@/lib/api";
+import { apiPost, apiPut } from "@/lib/api";
 
 type Status = "proposed" | "in_review" | "approved" | "deprecated";
 
@@ -24,6 +24,7 @@ function statusLabel(s: Status) {
 export default function NewDecisionPage() {
   const params = useParams<{ workspaceId?: string | string[] }>();
   const router = useRouter();
+
   const workspaceIdRaw = params.workspaceId;
   const workspaceId = Array.isArray(workspaceIdRaw)
     ? workspaceIdRaw[0]
@@ -64,40 +65,43 @@ export default function NewDecisionPage() {
 
   async function onSave() {
     if (!canSave) return;
+
     setSaving(true);
     setError(null);
 
     try {
+      // 1) Create the decision row (so it shows in the list)
       const created = (await apiPost(`/workspaces/${workspaceId}/decisions`, {
         title: title.trim(),
-        summary: context.trim() || null, // (you were using summary in list)
+        summary: context.trim() || null, // your list uses summary
+        // If your backend supports status on create, uncomment:
+        // status,
       })) as { id: string };
 
-      // OPTIONAL (only if your backend already supports these endpoints)
-      // If you DON'T have these endpoints yet, delete this block safely.
-      // - create decision details
-      // - create options
-      //
-      // await apiPost(`/decisions/${created.id}/details`, {
-      //   context: context.trim() || null,
-      //   final_decision: finalDecision.trim() || null,
-      //   rationale: rationale.trim() || null,
-      // });
-      //
-      // for (const o of options) {
-      //   if (!o.option_name.trim()) continue;
-      //   await apiPost(`/decisions/${created.id}/options`, {
-      //     option_name: o.option_name.trim(),
-      //     pros: o.pros.trim() || null,
-      //     cons: o.cons.trim() || null,
-      //     is_chosen: !!o.is_chosen,
-      //   });
-      // }
+      // 2) Create details row (so /details won't 404)
+      await apiPut(`/decisions/${created.id}/details`, {
+        context: context.trim() || "",
+        final_decision: finalDecision.trim() || "",
+        rationale: rationale.trim() || "",
+      });
 
+      // 3) Create options (optional but you said you want them to show right away)
+      for (const o of options) {
+        const name = o.option_name.trim();
+        if (!name) continue;
+
+        await apiPost(`/decisions/${created.id}/options`, {
+          option_name: name,
+          pros: o.pros.trim() || null,
+          cons: o.cons.trim() || null,
+          is_chosen: !!o.is_chosen,
+        });
+      }
+
+      // 4) Go to the detail page (now it will load clean)
       router.push(`/workspaces/${workspaceId}/decisions/${created.id}`);
     } catch (e: any) {
-      const msg = e?.message ?? "Failed to save decision";
-      setError(msg);
+      setError(e?.message ?? "Failed to save decision");
     } finally {
       setSaving(false);
     }
