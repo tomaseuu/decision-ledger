@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { apiDelete, apiGet, apiPost, apiPut } from "@/lib/api";
+import { supabase } from "@/lib/supabaseClient";
 
 type Decision = {
   id: string;
@@ -52,6 +53,18 @@ function coerceStatus(v: string | undefined): StatusValue {
   return (STATUS_OPTIONS as readonly string[]).includes(x) ? x : "proposed";
 }
 
+async function waitForSession(timeoutMs = 1200) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const { data } = await supabase.auth.getSession();
+    if (data.session) return data.session;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  return null;
+}
+
 function formatDate(dateString?: string) {
   if (!dateString) return "—";
   const d = new Date(dateString);
@@ -94,6 +107,12 @@ function StatusBadge({ status }: { status: string }) {
       {statusLabel(v)}
     </span>
   );
+}
+
+function clampText(s: string | undefined | null, max = 180) {
+  const t = (s ?? "").trim();
+  if (!t) return "—";
+  return t.length > max ? t.slice(0, max).trimEnd() + "…" : t;
 }
 
 function ConfirmModal(props: {
@@ -161,7 +180,7 @@ function ConfirmModal(props: {
             ].join(" ")}
             onClick={onConfirm}
           >
-            {busy ? "Working…" : confirmText}
+            {confirmText}
           </button>
         </div>
       </div>
@@ -226,6 +245,11 @@ export default function DecisionDetailPage() {
 
   const pageTitle = useMemo(() => decision?.title ?? "Decision", [decision]);
 
+  const chosenOption = useMemo(
+    () => options.find((o) => o.is_chosen),
+    [options],
+  );
+
   function openConfirm(args: {
     title: string;
     description?: string;
@@ -249,8 +273,79 @@ export default function DecisionDetailPage() {
     setConfirmError(null);
   }
 
+  useEffect(() => {
+    if (!workspaceId || !decisionId) return;
+
+    let alive = true;
+    let unsub: (() => void) | null = null;
+
+    async function fetchAll() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const [d, det, opts, revs] = await Promise.all([
+          apiGet(`/decisions/${decisionId}`),
+          apiGet(`/decisions/${decisionId}/details`),
+          apiGet(`/decisions/${decisionId}/options`),
+          apiGet(`/decisions/${decisionId}/revisions`),
+        ]);
+
+        if (!alive) return;
+
+        setDecision(d as any);
+        setDetails(det as any);
+        setOptions(Array.isArray(opts) ? (opts as any) : []);
+        setRevisions(Array.isArray(revs) ? (revs as any) : []);
+      } catch (e: any) {
+        if (!alive) return;
+        setError(e?.message ?? "Failed to load decision");
+      } finally {
+        if (!alive) return;
+        setLoading(false);
+      }
+    }
+
+    async function start() {
+      // 1) quick check
+      const { data } = await supabase.auth.getSession();
+      if (!alive) return;
+
+      if (data.session) {
+        // session exists → load immediately
+        fetchAll();
+        return;
+      }
+
+      // 2) session not ready yet → wait for auth event
+      // but don't hang forever
+      const timer = setTimeout(() => {
+        if (!alive) return;
+        setError("Session not ready yet. Try refreshing or signing in again.");
+        setLoading(false);
+      }, 2000);
+
+      const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+        if (!alive) return;
+        if (session) {
+          clearTimeout(timer);
+          fetchAll();
+        }
+      });
+
+      unsub = () => sub.subscription.unsubscribe();
+    }
+
+    start();
+
+    return () => {
+      alive = false;
+      if (unsub) unsub();
+    };
+  }, [workspaceId, decisionId]);
+
   async function runConfirm() {
-    if (!confirmAction) return;
+    if (!confirmAction || confirmBusy) return;
     setConfirmBusy(true);
     setConfirmError(null);
     try {
@@ -282,7 +377,6 @@ export default function DecisionDetailPage() {
   async function saveEdit() {
     if (!decision || !details) return;
 
-    // We *can* reliably save details via PUT /details
     const nextDetails: DecisionDetails = {
       ...details,
       context: editContext,
@@ -293,7 +387,6 @@ export default function DecisionDetailPage() {
     const prevDecision = decision;
     const prevDetails = details;
 
-    // Optimistic update (title/status locally)
     const nextDecision: Decision = {
       ...decision,
       title: editTitle.trim() || decision.title,
@@ -306,15 +399,12 @@ export default function DecisionDetailPage() {
     setDetails(nextDetails);
 
     try {
-      // ✅ backend supports this
       const updatedDetails = (await apiPut(`/decisions/${decisionId}/details`, {
         context: nextDetails.context,
         final_decision: nextDetails.final_decision,
         rationale: nextDetails.rationale,
       })) as DecisionDetails;
 
-      // NOTE: Your backend does NOT show an endpoint to update decision title/status.
-      // So we keep it client-side for now. If you add one, I’ll wire it in.
       setDetails(updatedDetails);
       setEditOpen(false);
     } catch (e: any) {
@@ -338,7 +428,6 @@ export default function DecisionDetailPage() {
 
     const prev = options;
 
-    // optimistic local choose
     setOptions((curr) =>
       curr.map((o) => ({
         ...o,
@@ -347,7 +436,6 @@ export default function DecisionDetailPage() {
     );
 
     try {
-      // ✅ matches your FastAPI: PUT /options/{option_id}/choose
       await apiPut(`/options/${optionId}/choose`, {});
     } catch (e: any) {
       setOptions(prev);
@@ -377,10 +465,13 @@ export default function DecisionDetailPage() {
         setOptions((curr) => curr.filter((o) => o.id !== optionId));
 
         try {
-          // If you have a real delete endpoint, switch to it.
-          // For now, try DELETE /decisions/{decisionId}/options/{optionId}
-          await apiDelete(`/decisions/${decisionId}/options/${optionId}`);
-        } catch (e) {
+          await apiDelete(`/options/${optionId}`);
+        } catch (e: any) {
+          const msg = e?.message ?? "";
+          if (msg.includes("404")) {
+            // treat as success: it’s already gone
+            return;
+          }
           setOptions(prev);
           throw e;
         }
@@ -402,8 +493,6 @@ export default function DecisionDetailPage() {
         setRevisions((curr) => curr.filter((r) => r.id !== revId));
 
         try {
-          // If you have a real delete endpoint, switch to it.
-          // For now, try DELETE /decisions/{decisionId}/revisions/{revId}
           await apiDelete(`/decisions/${decisionId}/revisions/${revId}`);
         } catch (e) {
           setRevisions(prev);
@@ -421,58 +510,11 @@ export default function DecisionDetailPage() {
       confirmText: "Delete",
       danger: true,
       action: async () => {
-        // ✅ You asked: “if I press delete, it should just remove it”
-        // This assumes you have DELETE /decisions/{decisionId} on backend.
         await apiDelete(`/decisions/${decisionId}`);
-
-        // Go back to decisions list immediately after delete
         router.push(`/workspaces/${workspaceId}/decisions`);
       },
     });
   }
-
-  useEffect(() => {
-    if (!workspaceId || !decisionId) return;
-
-    let alive = true;
-
-    async function load() {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const [d, det, opts, revs] = await Promise.all([
-          apiGet(`/decisions/${decisionId}`) as Promise<Decision>,
-          apiGet(
-            `/decisions/${decisionId}/details`,
-          ) as Promise<DecisionDetails>,
-          apiGet(`/decisions/${decisionId}/options`) as Promise<
-            DecisionOption[]
-          >,
-          apiGet(`/decisions/${decisionId}/revisions`) as Promise<Revision[]>,
-        ]);
-
-        if (!alive) return;
-
-        setDecision(d);
-        setDetails(det);
-        setOptions(opts);
-        setRevisions(revs);
-      } catch (e: any) {
-        if (!alive) return;
-        setError(e?.message ?? "Failed to load decision");
-      } finally {
-        if (!alive) return;
-        setLoading(false);
-      }
-    }
-
-    load();
-
-    return () => {
-      alive = false;
-    };
-  }, [workspaceId, decisionId]);
 
   return (
     <div className="min-h-screen bg-[#F8F9FB]">
@@ -744,15 +786,15 @@ export default function DecisionDetailPage() {
                     </div>
                   )}
                 </div>
-
                 {/* Final Decision */}
                 <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
                   <h2 className="text-lg font-semibold text-[#111827] mb-3">
                     Final Decision
                   </h2>
-                  <div className="rounded-lg border border-[#2563EB] border-opacity-20 bg-[#2563EB] bg-opacity-5 p-4">
-                    <p className="whitespace-pre-wrap font-medium text-[#111827]">
-                      {details?.final_decision || "—"}
+
+                  <div className="rounded-lg bg-[#2563EB] px-5 py-4 text-white">
+                    <p className="whitespace-pre-wrap leading-relaxed">
+                      {details?.final_decision || "No final decision provided."}
                     </p>
                   </div>
                 </div>
@@ -763,10 +805,9 @@ export default function DecisionDetailPage() {
                     Rationale
                   </h2>
                   <p className="whitespace-pre-wrap leading-relaxed text-[#111827]">
-                    {details?.rationale || "—"}
+                    {details?.rationale || "No rationale provided."}
                   </p>
                 </div>
-
                 {/* Revision History */}
                 <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
                   <div className="flex items-center justify-between mb-4">
@@ -829,21 +870,14 @@ export default function DecisionDetailPage() {
                 </div>
               </div>
 
-              {/* Sidebar - 1 column */}
+              {/* Sidebar - 1 column (REPLACED) */}
               <div className="space-y-6">
                 <div className="rounded-lg border border-[#E5E7EB] bg-white p-6">
                   <h2 className="text-sm font-semibold text-[#111827] mb-4">
-                    Metadata
+                    Decision Summary
                   </h2>
 
-                  <div className="space-y-3">
-                    <div>
-                      <div className="text-xs text-[#6B7280] mb-1">Owner</div>
-                      <div className="text-sm font-medium text-[#111827]">
-                        {decision?.owner_id || "Demo User"}
-                      </div>
-                    </div>
-
+                  <div className="space-y-4">
                     <div>
                       <div className="text-xs text-[#6B7280] mb-1">Status</div>
                       <div>
@@ -856,25 +890,53 @@ export default function DecisionDetailPage() {
                     </div>
 
                     <div>
-                      <div className="text-xs text-[#6B7280] mb-1">Created</div>
-                      <div className="text-sm text-[#111827]">
-                        {formatDate(decision?.created_at)}
-                      </div>
-                    </div>
-
-                    <div>
                       <div className="text-xs text-[#6B7280] mb-1">
-                        Last Updated
+                        Chosen Option
                       </div>
-                      <div className="text-sm text-[#111827]">
-                        {formatDate(decision?.updated_at)}
+                      <div className="text-sm font-medium text-[#111827]">
+                        {chosenOption ? chosenOption.option_name : "—"}
                       </div>
+
+                      {chosenOption && (
+                        <div className="mt-3 grid grid-cols-2 gap-3">
+                          <div>
+                            <div className="text-xs font-medium text-[#16A34A] mb-1">
+                              Pros
+                            </div>
+                            <div className="text-sm text-[#111827] whitespace-pre-wrap">
+                              {clampText(chosenOption.pros, 140)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs font-medium text-[#DC2626] mb-1">
+                              Cons
+                            </div>
+                            <div className="text-sm text-[#111827] whitespace-pre-wrap">
+                              {clampText(chosenOption.cons, 140)}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
-                    <div>
-                      <div className="text-xs text-[#6B7280] mb-1">ID</div>
-                      <div className="text-sm text-[#111827] break-all">
-                        {decisionId}
+                    <div className="pt-2 border-t border-[#E5E7EB]">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <div className="text-xs text-[#6B7280] mb-1">
+                            Created
+                          </div>
+                          <div className="text-sm text-[#111827]">
+                            {formatDate(decision?.created_at)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-[#6B7280] mb-1">
+                            Updated
+                          </div>
+                          <div className="text-sm text-[#111827]">
+                            {formatDate(decision?.updated_at)}
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1061,7 +1123,9 @@ export default function DecisionDetailPage() {
                   try {
                     const created = (await apiPost(
                       `/decisions/${decisionId}/revisions`,
-                      { summary: text },
+                      {
+                        summary: text,
+                      },
                     )) as Revision;
 
                     setRevisions((prev) => [created, ...prev]);

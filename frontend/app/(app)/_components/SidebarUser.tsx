@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type UiUser = {
@@ -21,8 +22,25 @@ function initialsFrom(name: string, email: string) {
   return (email?.[0] ?? "U").toUpperCase();
 }
 
+function workspaceIdFromPath(pathname: string) {
+  // expects /workspaces/:workspaceId/...
+  const m = pathname.match(/^\/workspaces\/([^\/]+)/);
+  return m?.[1] ?? null;
+}
+
 export default function SidebarUser() {
   const router = useRouter();
+  const pathname = usePathname();
+
+  const workspaceId = useMemo(
+    () => workspaceIdFromPath(pathname || ""),
+    [pathname],
+  );
+
+  const settingsHref = workspaceId
+    ? `/workspaces/${workspaceId}/settings`
+    : "/workspaces";
+
   const [open, setOpen] = useState(false);
   const [u, setU] = useState<UiUser | null>(null);
 
@@ -71,18 +89,25 @@ export default function SidebarUser() {
     setOpen(false);
     setU(null);
 
-    // this clears the session
     await supabase.auth.signOut();
     router.replace("/auth/sign-in");
     router.refresh();
-
-    // no redirect here — AuthGate will catch "no session" and send to /auth/sign-in
   }
 
   return (
     <div className="relative" data-user-menu>
       {open && (
         <div className="absolute bottom-14 left-0 w-full overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-lg">
+          <Link
+            href={settingsHref}
+            onClick={() => setOpen(false)}
+            className="block w-full px-4 py-3 text-left text-sm font-medium text-neutral-900 hover:bg-neutral-50"
+          >
+            Settings
+          </Link>
+
+          <div className="h-px bg-neutral-100" />
+
           <button
             onClick={logout}
             className="w-full px-4 py-3 text-left text-sm font-medium text-red-600 hover:bg-neutral-50"
